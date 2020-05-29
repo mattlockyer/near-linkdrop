@@ -14,6 +14,7 @@ pub struct LinkDrop {
     pub accounts: Map<PublicKey, Balance>,
 }
 
+
 /// Access key allowance for linkdrop keys.
 const ACCESS_KEY_ALLOWANCE: u128 = 1_000_000_000_000_000_000_000;
 
@@ -38,6 +39,7 @@ fn is_promise_success() -> bool {
         1,
         "Contract expected a result on the callback"
     );
+
     match env::promise_result(0) {
         PromiseResult::Successful(_) => true,
         _ => false,
@@ -118,6 +120,56 @@ impl LinkDrop {
             ))
     }
 
+    /// Create and fund new account with limited access key to contract methods.
+    pub fn create_limited_contract_account(
+        &mut self,
+        new_account_id: AccountId,
+        new_public_key: Base58PublicKey,
+        allowance: u128,
+        contract_bytes: Vec<u8>,
+        method_names: Vec<u8>,
+    ) -> Promise {
+        assert_eq!(
+            env::predecessor_account_id(),
+            env::current_account_id(),
+            "Create account and claim only can come from this account"
+        );
+        assert!(
+            env::is_valid_account_id(new_account_id.as_bytes()),
+            "Invalid account id"
+        );
+        let amount = self
+            .accounts
+            .remove(&env::signer_account_pk())
+            .expect("Unexpected public key");
+
+        Promise::new(new_account_id.clone())
+            .create_account()
+            .transfer(amount)
+            .deploy_contract(contract_bytes)
+            .add_access_key(
+                new_public_key.into(),
+                allowance,
+                new_account_id,
+                method_names
+            ).then(
+                ext_self::on_account_created_and_claimed(
+                amount.into(),
+                &env::current_account_id(),
+                NO_DEPOSIT,
+                ON_CREATE_ACCOUNT_CALLBACK_GAS,
+            ))
+    }
+
+    pub fn create_contract(
+        &mut self,
+        promise: Promise,
+        contract_bytes: Vec<u8>,
+    ) -> Promise {
+        promise
+            .deploy_contract(contract_bytes)
+    }
+
     /// Create new account without linkdrop and deposit passed funds (used for creating sub accounts directly).
     #[payable]
     pub fn create_account(
@@ -186,6 +238,9 @@ mod tests {
     use near_sdk::{testing_env, BlockHeight, PublicKey, VMContext};
 
     use super::*;
+
+    /// Access key allowance for linkdrop contract (unlimited)
+    const LIMITED_ACCESS_KEY_ALLOWANCE: u128 = 340_282_366_920_938_463_463_374_607_431_768_211_455;
 
     pub struct VMContextBuilder {
         context: VMContext,
@@ -269,6 +324,42 @@ mod tests {
 
     fn bob() -> String {
         "bob".to_string()
+    }
+
+    #[test]
+    fn test_create_limited_contract_account() {
+        let mut contract = LinkDrop::default();
+        let pk: Base58PublicKey = "qSq3LoufLvTCTNGC3LJePMDGrok8dHMQ5A1YD9psbiz"
+            .try_into()
+            .unwrap();
+        // Deposit money to linkdrop contract.
+        let deposit = ACCESS_KEY_ALLOWANCE * 100;
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(linkdrop())
+            .attached_deposit(deposit)
+            .finish());
+        contract.send(pk.clone());
+        // Now, send new transaction to link drop contract.
+        let context = VMContextBuilder::new()
+            .current_account_id(linkdrop())
+            .predecessor_account_id(linkdrop())
+            .signer_account_pk(pk.into())
+            .account_balance(deposit)
+            .finish();
+        testing_env!(context);
+        let pk2 = "2S87aQ1PM9o6eBcEXnTR5yBAVRTiNmvj8J8ngZ6FzSca"
+            .try_into()
+            .unwrap();
+        let contract_bytes = include_bytes!("../res/multisig.wasm").to_vec();
+        let method_names = "multisig_method_a,multisig_method_b".as_bytes().to_vec();
+
+        contract.create_limited_contract_account(
+            bob(),
+            pk2,
+            LIMITED_ACCESS_KEY_ALLOWANCE,
+            contract_bytes,
+            method_names
+        );
     }
 
     #[test]
